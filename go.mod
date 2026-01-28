@@ -1,4 +1,4 @@
-module githib.com/Nemutagk/godbmongodb
+module github.com/Nemutagk/godbmongodb
 
 go 1.25.6
 
