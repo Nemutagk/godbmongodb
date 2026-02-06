@@ -101,8 +101,8 @@ func (m *MongodbAdapter) Ping() error {
 		return fmt.Errorf("no active connection")
 	}
 
-	client := m.Conn.(*mongo.Client)
-	if err := client.Ping(ctx, nil); err != nil {
+	client := m.Conn.(*mongo.Database)
+	if err := client.Client().Ping(ctx, nil); err != nil {
 		return err
 	}
 

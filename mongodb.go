@@ -11,6 +11,7 @@ import (
 	"github.com/Nemutagk/godb/v2"
 	"github.com/Nemutagk/godb/v2/definitions/models"
 	"github.com/Nemutagk/godb/v2/definitions/repository"
+	"github.com/Nemutagk/goenvars"
 	"github.com/Nemutagk/golog"
 	"github.com/google/uuid"
 	"go.mongodb.org/mongo-driver/bson"
@@ -522,6 +523,16 @@ func NewConnection[T Model](config NewConnectionConfig) (repository.DriverConnec
 
 	dbCollection := dbConnDatabase.Collection(config.Collection)
 
+	insertId := true
+	if config.InsertId != nil && *config.InsertId {
+		insertId = *config.InsertId
+	}
+
+	insertTimestamps := true
+	if config.InsertTimestamps != nil && *config.InsertTimestamps {
+		insertTimestamps = *config.InsertTimestamps
+	}
+
 	return &Connection[T]{
 		Name:             config.Name,
 		Collection:       config.Collection,
@@ -530,8 +541,8 @@ func NewConnection[T Model](config NewConnectionConfig) (repository.DriverConnec
 		OrderColumns:     config.OrderColumns,
 		SoftDelete:       config.SoftDelete,
 		RelationLoaders:  config.Relationer,
-		InsertId:         config.InsertId != nil && *config.InsertId,
-		InsertTimestamps: config.InsertTimestamps != nil && *config.InsertTimestamps,
+		InsertId:         insertId,
+		InsertTimestamps: insertTimestamps,
 	}, nil
 }
 
@@ -589,6 +600,13 @@ func (c *Connection[T]) Get(ctx context.Context, filters models.GroupFilter, opt
 	}
 
 	if err != nil {
+		if goenvars.GetEnvBool("MONGODB_DEBUG", false) {
+			golog.Error(ctx, "error al buscar muchos: %v", err)
+		}
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, godb.ErrNoDocumentsFound
+		}
+
 		return nil, err
 	}
 
@@ -661,8 +679,11 @@ func (c *Connection[T]) GetOne(ctx context.Context, filters models.GroupFilter, 
 		var result T
 		err := c.Connection.FindOne(ctx, mFilters, mOpts).Decode(&result)
 		if err != nil {
+			if goenvars.GetEnvBool("MONGODB_DEBUG", false) {
+				golog.Error(ctx, "error al buscar uno: %v", err)
+			}
 			if err == mongo.ErrNoDocuments {
-				return *new(T), nil
+				return *new(T), godb.ErrNoDocumentsFound
 			}
 			return *new(T), err
 		}
@@ -674,7 +695,7 @@ func (c *Connection[T]) GetOne(ctx context.Context, filters models.GroupFilter, 
 	err := c.Connection.FindOne(ctx, mFilters).Decode(&result)
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
-			return *new(T), nil
+			return *new(T), godb.ErrNoDocumentsFound
 		}
 		return *new(T), err
 	}
@@ -708,7 +729,7 @@ func (c *Connection[T]) GetOne(ctx context.Context, filters models.GroupFilter, 
 }
 
 func (c *Connection[T]) Create(ctx context.Context, data map[string]any, opts *models.Options) (T, error) {
-	var payload bson.M
+	payload := bson.M{}
 
 	if c.InsertId {
 		id := "_id"
@@ -727,10 +748,28 @@ func (c *Connection[T]) Create(ctx context.Context, data map[string]any, opts *m
 	}
 
 	for key, value := range data {
+		if strings.Contains(key, "_at") {
+			t, err := time.Parse("2006-01-02", value.(string))
+			if err == nil {
+				payload[key] = t
+				continue
+			}
+			t, err = time.Parse("2006-01-02T15:04:05", value.(string))
+			if err == nil {
+				payload[key] = t
+				continue
+			}
+			t, err = time.Parse(time.RFC3339, value.(string))
+			if err == nil {
+				payload[key] = t
+				continue
+			}
+		}
+
 		payload[key] = value
 	}
 
-	if opts != nil && c.InsertTimestamps {
+	if c.InsertTimestamps {
 		now := time.Now().UTC()
 		payload["created_at"] = now
 		payload["updated_at"] = now
@@ -738,6 +777,9 @@ func (c *Connection[T]) Create(ctx context.Context, data map[string]any, opts *m
 
 	res, err := c.Connection.InsertOne(ctx, payload)
 	if err != nil {
+		if goenvars.GetEnvBool("MONGODB_DEBUG", false) {
+			golog.Error(ctx, "error al insertar: %v", err)
+		}
 		return *new(T), err
 	}
 
@@ -779,10 +821,27 @@ func (c *Connection[T]) CreateMany(ctx context.Context, data []map[string]any, o
 		}
 
 		for key, value := range item {
+			if strings.Contains(key, "_at") {
+				t, err := time.Parse("2006-01-02", value.(string))
+				if err == nil {
+					payload[key] = t
+					continue
+				}
+				t, err = time.Parse("2006-01-02T15:04:05", value.(string))
+				if err == nil {
+					payload[key] = t
+					continue
+				}
+				t, err = time.Parse(time.RFC3339, value.(string))
+				if err == nil {
+					payload[key] = t
+					continue
+				}
+			}
 			payload[key] = value
 		}
 
-		if opts != nil && c.InsertTimestamps {
+		if c.InsertTimestamps {
 			now := time.Now().UTC()
 			payload["created_at"] = now
 			payload["updated_at"] = now
@@ -793,6 +852,10 @@ func (c *Connection[T]) CreateMany(ctx context.Context, data []map[string]any, o
 
 	res, err := c.Connection.InsertMany(ctx, payloads)
 	if err != nil {
+		if goenvars.GetEnvBool("MONGODB_DEBUG", false) {
+			golog.Error(ctx, "error al insertar muchos: %v", err)
+		}
+
 		return nil, err
 	}
 
@@ -836,12 +899,43 @@ func (c *Connection[T]) Update(ctx context.Context, filters models.GroupFilter, 
 
 	bsonFilters := prepareFilters(filters)
 
+	payload := map[string]any{}
+	for key, value := range data {
+		if strings.Contains(key, "_at") {
+			t, err := time.Parse("2006-01-02", value.(string))
+			if err == nil {
+				payload[key] = t
+				continue
+			}
+			t, err = time.Parse("2006-01-02T15:04:05", value.(string))
+			if err == nil {
+				payload[key] = t
+				continue
+			}
+			t, err = time.Parse(time.RFC3339, value.(string))
+			if err == nil {
+				payload[key] = t
+				continue
+			}
+		}
+
+		payload[key] = value
+	}
+
 	update := bson.M{
 		"$set": data,
 	}
 
 	_, err := c.Connection.UpdateMany(ctx, bsonFilters, update)
 	if err != nil {
+		if goenvars.GetEnvBool("MONGODB_DEBUG", false) {
+			golog.Error(ctx, "error al actualizar: %v", err)
+		}
+
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return *new(T), godb.ErrNoDocumentsFound
+		}
+
 		return *new(T), err
 	}
 
@@ -882,6 +976,13 @@ func (c *Connection[T]) Delete(ctx context.Context, filters models.GroupFilter) 
 
 	_, err := c.Connection.DeleteMany(ctx, bsonFilters)
 	if err != nil {
+		if goenvars.GetEnvBool("MONGODB_DEBUG", false) {
+			golog.Error(ctx, "error al eliminar: %v", err)
+		}
+
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return godb.ErrNoDocumentsFound
+		}
 		return err
 	}
 
@@ -944,6 +1045,10 @@ func (c *Connection[T]) Count(ctx context.Context, filters models.GroupFilter) (
 
 	count, err := c.Connection.CountDocuments(ctx, bsonFilters)
 	if err != nil {
+		if goenvars.GetEnvBool("MONGODB_DEBUG", false) {
+			golog.Error(ctx, "error al contar documentos: %v", err)
+		}
+
 		return 0, err
 	}
 
