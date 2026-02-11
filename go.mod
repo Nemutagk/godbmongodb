@@ -3,7 +3,7 @@ module github.com/Nemutagk/godbmongodb
 go 1.25.6
 
 require (
-	github.com/Nemutagk/godb/v2 v2.9.1
+	github.com/Nemutagk/godb/v2 v2.9.2
 	github.com/Nemutagk/goenvars v1.4.0
 	github.com/Nemutagk/golog v1.4.1
 	github.com/google/uuid v1.6.0
@@ -37,4 +37,4 @@ require (
 	golang.org/x/text v0.22.0 // indirect
 )
 
-replace github.com/Nemutagk/godb/v2 => /Users/josealbertocabrerabarrios/Documents/ServidorPrivado/godb
+// replace github.com/Nemutagk/godb/v2 => /Users/josealbertocabrerabarrios/Documents/ServidorPrivado/godb
