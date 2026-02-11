@@ -2,6 +2,7 @@ package godbmongodb
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -787,6 +788,11 @@ func (c *Connection[T]) Create(ctx context.Context, data map[string]any, opts *m
 			if err != nil {
 				if goenvars.GetEnvBool("MONGODB_DEBUG", false) {
 					golog.Error(ctx, "error al hacer upsert insert_update: %v", err)
+					jpayload, err := json.Marshal(upPayload)
+					if err != nil {
+						golog.Error(ctx, "error al serializar payload de upsert insert_update: %v", err)
+					}
+					golog.Log(ctx, "payload: %s", string(jpayload))
 				}
 
 				return *new(T), fmt.Errorf("failed to perform upsert insert_update: %w", err)
@@ -1193,19 +1199,22 @@ func prepareForeignKey(str string) string {
 func prepareNewDoc[T Model](c *Connection[T], data map[string]any, opts *models.Options) (bson.M, error) {
 	payload := bson.M{}
 
+	pkKey := "_id"
+	if opts != nil && opts.PrimaryKey != nil && *opts.PrimaryKey != "" {
+		pkKey = *opts.PrimaryKey
+	}
+
 	if c.InsertId {
-		id := "_id"
+		val, ok := data[pkKey]
 
-		if opts != nil && opts.PrimaryKey != nil && *opts.PrimaryKey != "" {
-			id = *opts.PrimaryKey
-		}
+		strVal, isString := val.(string)
 
-		uuid, err := uuid.NewV7()
-		if err != nil {
-			return nil, err
-		}
-		payload = bson.M{
-			id: uuid.String(),
+		if !ok || val == nil || (isString && strVal == "") {
+			uuid, err := uuid.NewV7()
+			if err != nil {
+				return nil, err
+			}
+			data[pkKey] = uuid.String()
 		}
 	}
 
