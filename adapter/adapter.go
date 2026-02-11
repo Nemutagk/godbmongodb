@@ -8,8 +8,8 @@ import (
 
 	"github.com/Nemutagk/godb/v2/definitions/adapter"
 	"github.com/Nemutagk/godb/v2/definitions/config"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 type MongodbAdapter struct {
@@ -73,7 +73,7 @@ func (m *MongodbAdapter) Connect() error {
 	}
 
 	opts := options.Client().ApplyURI(m.Dsn)
-	client, err := mongo.Connect(ctx, opts)
+	client, err := mongo.Connect(opts)
 	if err != nil {
 		return err
 	}

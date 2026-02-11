@@ -14,9 +14,16 @@ import (
 	"github.com/Nemutagk/goenvars"
 	"github.com/Nemutagk/golog"
 	"github.com/google/uuid"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
+)
+
+const (
+	UpsertTypeInsertUpdate  = "insert_update"
+	UpsertTypeInsertReplace = "insert_replace"
+	UpsertTypeAddToSet      = "add_to_set"
+	UpsertTypePush          = "push"
 )
 
 type Model interface {
@@ -506,6 +513,13 @@ type Connection[T Model] struct {
 	InsertTimestamps bool
 }
 
+type Upsert struct {
+	Fitlers models.GroupFilter
+	Type    string
+	Update  map[string]any
+	New     map[string]any
+}
+
 func NewConnection[T Model](config NewConnectionConfig) (repository.DriverConnection[T], error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -731,48 +745,123 @@ func (c *Connection[T]) GetOne(ctx context.Context, filters models.GroupFilter, 
 func (c *Connection[T]) Create(ctx context.Context, data map[string]any, opts *models.Options) (T, error) {
 	payload := bson.M{}
 
-	if c.InsertId {
-		id := "_id"
-
-		if opts != nil && *opts.PrimaryKey != "" {
-			id = *opts.PrimaryKey
+	if opts != nil && opts.Custom != nil && opts.Custom["upsert"] != nil {
+		upsertData, ok := opts.Custom["upsert"].(Upsert)
+		if !ok {
+			return *new(T), fmt.Errorf("invalid upsert data")
 		}
 
-		uuid, err := uuid.NewV7()
-		if err != nil {
-			return *new(T), err
+		if upsertData.Update != nil {
+			tmpPayload, err := prepareUpdateDoc(c, upsertData.Update)
+			if err != nil {
+				return *new(T), fmt.Errorf("invalid update data for upsert: %w", err)
+			}
+			upsertData.Update = tmpPayload
 		}
-		payload = bson.M{
-			id: uuid.String(),
+
+		if upsertData.New != nil {
+			tmpPayload, err := prepareNewDoc(c, upsertData.New, opts)
+			if err != nil {
+				return *new(T), fmt.Errorf("invalid update data for upsert: %w", err)
+			}
+			upsertData.New = tmpPayload
+		}
+
+		upsertFilters := prepareFilters(upsertData.Fitlers)
+		switch upsertData.Type {
+		case UpsertTypeInsertUpdate:
+			optsUp := options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(options.After)
+
+			upPayload := bson.M{}
+
+			if upsertData.Update != nil {
+				upPayload["$set"] = upsertData.Update
+			}
+
+			if upsertData.New != nil {
+				upPayload["$setOnInsert"] = upsertData.New
+			}
+
+			var result T
+			err := c.Connection.FindOneAndUpdate(ctx, upsertFilters, upPayload, optsUp).Decode(&result)
+			if err != nil {
+				if goenvars.GetEnvBool("MONGODB_DEBUG", false) {
+					golog.Error(ctx, "error al hacer upsert insert_update: %v", err)
+				}
+
+				return *new(T), fmt.Errorf("failed to perform upsert insert_update: %w", err)
+			}
+
+			return result, nil
+		case UpsertTypeInsertReplace:
+			optsUp := options.Replace().SetUpsert(true)
+
+			_, err := c.Connection.ReplaceOne(ctx, upsertFilters, upsertData.New, optsUp)
+			if err != nil {
+				if goenvars.GetEnvBool("MONGODB_DEBUG", false) {
+					golog.Error(ctx, "error al hacer upsert insert_replace: %v", err)
+				}
+				return *new(T), fmt.Errorf("failed to perform upsert insert_replace: %w", err)
+			}
+
+			found, err := c.GetOne(ctx, upsertData.Fitlers, nil)
+			if err != nil {
+				return *new(T), err
+			}
+
+			return found, nil
+		case UpsertTypeAddToSet:
+			optsUp := options.UpdateOne().SetUpsert(true)
+
+			upPayload := bson.M{
+				"$setOnInsert": upsertData.New,
+				"$addToSet":    upsertData.Update,
+			}
+
+			_, err := c.Connection.UpdateOne(ctx, upsertFilters, upPayload, optsUp)
+			if err != nil {
+				if goenvars.GetEnvBool("MONGODB_DEBUG", false) {
+					golog.Error(ctx, "error al hacer upsert add_to_set: %v", err)
+				}
+				return *new(T), fmt.Errorf("failed to perform upsert add_to_set: %w", err)
+			}
+
+			found, err := c.GetOne(ctx, upsertData.Fitlers, nil)
+			if err != nil {
+				return *new(T), err
+			}
+
+			return found, nil
+		case UpsertTypePush:
+			optsUp := options.UpdateOne().SetUpsert(true)
+
+			upPayload := bson.M{
+				"$setOnInsert": upsertData.New,
+				"$push":        upsertData.Update,
+			}
+
+			_, err := c.Connection.UpdateOne(ctx, upsertFilters, upPayload, optsUp)
+			if err != nil {
+				if goenvars.GetEnvBool("MONGODB_DEBUG", false) {
+					golog.Error(ctx, "error al hacer upsert push: %v", err)
+				}
+				return *new(T), fmt.Errorf("failed to perform upsert push: %w", err)
+			}
+
+			found, err := c.GetOne(ctx, upsertData.Fitlers, nil)
+			if err != nil {
+				return *new(T), err
+			}
+
+			return found, nil
+		default:
+			return *new(T), fmt.Errorf("invalid upsert type: %s", upsertData.Type)
 		}
 	}
 
-	for key, value := range data {
-		if strings.Contains(key, "_at") {
-			t, err := time.Parse("2006-01-02", value.(string))
-			if err == nil {
-				payload[key] = t
-				continue
-			}
-			t, err = time.Parse("2006-01-02T15:04:05", value.(string))
-			if err == nil {
-				payload[key] = t
-				continue
-			}
-			t, err = time.Parse(time.RFC3339, value.(string))
-			if err == nil {
-				payload[key] = t
-				continue
-			}
-		}
-
-		payload[key] = value
-	}
-
-	if c.InsertTimestamps {
-		now := time.Now().UTC()
-		payload["created_at"] = now
-		payload["updated_at"] = now
+	payload, err := prepareNewDoc(c, data, opts)
+	if err != nil {
+		return *new(T), err
 	}
 
 	res, err := c.Connection.InsertOne(ctx, payload)
@@ -806,45 +895,9 @@ func (c *Connection[T]) CreateMany(ctx context.Context, data []map[string]any, o
 	for _, item := range data {
 		payload := bson.M{}
 
-		if c.InsertId {
-			id := "_id"
-
-			if opts != nil && *opts.PrimaryKey != "" {
-				id = *opts.PrimaryKey
-			}
-
-			uuid, err := uuid.NewV7()
-			if err != nil {
-				return nil, err
-			}
-			payload[id] = uuid.String()
-		}
-
-		for key, value := range item {
-			if strings.Contains(key, "_at") {
-				t, err := time.Parse("2006-01-02", value.(string))
-				if err == nil {
-					payload[key] = t
-					continue
-				}
-				t, err = time.Parse("2006-01-02T15:04:05", value.(string))
-				if err == nil {
-					payload[key] = t
-					continue
-				}
-				t, err = time.Parse(time.RFC3339, value.(string))
-				if err == nil {
-					payload[key] = t
-					continue
-				}
-			}
-			payload[key] = value
-		}
-
-		if c.InsertTimestamps {
-			now := time.Now().UTC()
-			payload["created_at"] = now
-			payload["updated_at"] = now
+		payload, err := prepareNewDoc(c, item, opts)
+		if err != nil {
+			return nil, err
 		}
 
 		payloads = append(payloads, payload)
@@ -893,40 +946,18 @@ func (c *Connection[T]) Update(ctx context.Context, filters models.GroupFilter, 
 		filters.Filters = append(filters.Filters, deletedFilter)
 	}
 
-	if opts != nil && c.InsertTimestamps {
-		data["updated_at"] = time.Now().UTC()
-	}
-
 	bsonFilters := prepareFilters(filters)
 
-	payload := map[string]any{}
-	for key, value := range data {
-		if strings.Contains(key, "_at") {
-			t, err := time.Parse("2006-01-02", value.(string))
-			if err == nil {
-				payload[key] = t
-				continue
-			}
-			t, err = time.Parse("2006-01-02T15:04:05", value.(string))
-			if err == nil {
-				payload[key] = t
-				continue
-			}
-			t, err = time.Parse(time.RFC3339, value.(string))
-			if err == nil {
-				payload[key] = t
-				continue
-			}
-		}
-
-		payload[key] = value
+	payload, err := prepareUpdateDoc(c, data)
+	if err != nil {
+		return *new(T), err
 	}
 
 	update := bson.M{
-		"$set": data,
+		"$set": payload,
 	}
 
-	_, err := c.Connection.UpdateMany(ctx, bsonFilters, update)
+	_, err = c.Connection.UpdateMany(ctx, bsonFilters, update)
 	if err != nil {
 		if goenvars.GetEnvBool("MONGODB_DEBUG", false) {
 			golog.Error(ctx, "error al actualizar: %v", err)
@@ -1114,7 +1145,7 @@ func prepareFilters(filters models.GroupFilter) bson.M {
 	return bsonFilters
 }
 
-func prepareOpts(opts *models.Options) *options.FindOptions {
+func prepareOpts(opts *models.Options) *options.FindOptionsBuilder {
 	mOpts := options.Find()
 
 	if opts.Limit != 0 {
@@ -1157,4 +1188,86 @@ func prepareForeignKey(str string) string {
 	}
 
 	return buffer.String()
+}
+
+func prepareNewDoc[T Model](c *Connection[T], data map[string]any, opts *models.Options) (bson.M, error) {
+	payload := bson.M{}
+
+	if c.InsertId {
+		id := "_id"
+
+		if opts != nil && opts.PrimaryKey != nil && *opts.PrimaryKey != "" {
+			id = *opts.PrimaryKey
+		}
+
+		uuid, err := uuid.NewV7()
+		if err != nil {
+			return nil, err
+		}
+		payload = bson.M{
+			id: uuid.String(),
+		}
+	}
+
+	for key, value := range data {
+		if strings.Contains(key, "_at") {
+			t, err := time.Parse("2006-01-02", value.(string))
+			if err == nil {
+				payload[key] = t
+				continue
+			}
+			t, err = time.Parse("2006-01-02T15:04:05", value.(string))
+			if err == nil {
+				payload[key] = t
+				continue
+			}
+			t, err = time.Parse(time.RFC3339, value.(string))
+			if err == nil {
+				payload[key] = t
+				continue
+			}
+		}
+
+		payload[key] = value
+	}
+
+	if c.InsertTimestamps {
+		now := time.Now().UTC()
+		payload["created_at"] = now
+		payload["updated_at"] = now
+	}
+
+	return payload, nil
+}
+
+func prepareUpdateDoc[T Model](c *Connection[T], data map[string]any) (bson.M, error) {
+	update := bson.M{}
+
+	for key, value := range data {
+		if strings.Contains(key, "_at") {
+			t, err := time.Parse("2006-01-02", value.(string))
+			if err == nil {
+				update[key] = t
+				continue
+			}
+			t, err = time.Parse("2006-01-02T15:04:05", value.(string))
+			if err == nil {
+				update[key] = t
+				continue
+			}
+			t, err = time.Parse(time.RFC3339, value.(string))
+			if err == nil {
+				update[key] = t
+				continue
+			}
+		}
+
+		update[key] = value
+	}
+
+	if c.InsertTimestamps {
+		update["updated_at"] = time.Now().UTC()
+	}
+
+	return update, nil
 }
