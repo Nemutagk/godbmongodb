@@ -2,7 +2,6 @@ package godbmongodb
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -515,10 +514,8 @@ type Connection[T Model] struct {
 }
 
 type Upsert struct {
-	Fitlers models.GroupFilter
+	Filters *models.GroupFilter
 	Type    string
-	Update  map[string]any
-	New     map[string]any
 }
 
 func NewConnection[T Model](config NewConnectionConfig) (repository.DriverConnection[T], error) {
@@ -752,47 +749,25 @@ func (c *Connection[T]) Create(ctx context.Context, data map[string]any, opts *m
 			return *new(T), fmt.Errorf("invalid upsert data")
 		}
 
-		if upsertData.Update != nil {
-			tmpPayload, err := prepareUpdateDoc(c, upsertData.Update)
-			if err != nil {
-				return *new(T), fmt.Errorf("invalid update data for upsert: %w", err)
-			}
-			upsertData.Update = tmpPayload
+		if upsertData.Filters == nil {
+			return *new(T), fmt.Errorf("upsert filters cannot be nil")
 		}
 
-		if upsertData.New != nil {
-			tmpPayload, err := prepareNewDoc(c, upsertData.New, opts)
-			if err != nil {
-				return *new(T), fmt.Errorf("invalid update data for upsert: %w", err)
-			}
-			upsertData.New = tmpPayload
+		data, err := prepareNewDoc(c, data, opts)
+		if err != nil {
+			return *new(T), err
 		}
 
-		upsertFilters := prepareFilters(upsertData.Fitlers)
+		upsertFilters := prepareFilters(*upsertData.Filters)
 		switch upsertData.Type {
 		case UpsertTypeInsertUpdate:
 			optsUp := options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(options.After)
 
-			upPayload := bson.M{}
-
-			if upsertData.Update != nil {
-				upPayload["$set"] = upsertData.Update
-			}
-
-			if upsertData.New != nil {
-				upPayload["$setOnInsert"] = upsertData.New
-			}
-
 			var result T
-			err := c.Connection.FindOneAndUpdate(ctx, upsertFilters, upPayload, optsUp).Decode(&result)
+			err := c.Connection.FindOneAndUpdate(ctx, upsertFilters, data, optsUp).Decode(&result)
 			if err != nil {
 				if goenvars.GetEnvBool("MONGODB_DEBUG", false) {
 					golog.Error(ctx, "error al hacer upsert insert_update: %v", err)
-					jpayload, err := json.Marshal(upPayload)
-					if err != nil {
-						golog.Error(ctx, "error al serializar payload de upsert insert_update: %v", err)
-					}
-					golog.Log(ctx, "payload: %s", string(jpayload))
 				}
 
 				return *new(T), fmt.Errorf("failed to perform upsert insert_update: %w", err)
@@ -802,67 +777,43 @@ func (c *Connection[T]) Create(ctx context.Context, data map[string]any, opts *m
 		case UpsertTypeInsertReplace:
 			optsUp := options.Replace().SetUpsert(true)
 
-			_, err := c.Connection.ReplaceOne(ctx, upsertFilters, upsertData.New, optsUp)
+			_, err := c.Connection.ReplaceOne(ctx, upsertFilters, data, optsUp)
 			if err != nil {
 				if goenvars.GetEnvBool("MONGODB_DEBUG", false) {
 					golog.Error(ctx, "error al hacer upsert insert_replace: %v", err)
 				}
 				return *new(T), fmt.Errorf("failed to perform upsert insert_replace: %w", err)
 			}
-
-			found, err := c.GetOne(ctx, upsertData.Fitlers, nil)
-			if err != nil {
-				return *new(T), err
-			}
-
-			return found, nil
 		case UpsertTypeAddToSet:
 			optsUp := options.UpdateOne().SetUpsert(true)
 
-			upPayload := bson.M{
-				"$setOnInsert": upsertData.New,
-				"$addToSet":    upsertData.Update,
-			}
-
-			_, err := c.Connection.UpdateOne(ctx, upsertFilters, upPayload, optsUp)
+			_, err := c.Connection.UpdateOne(ctx, upsertFilters, data, optsUp)
 			if err != nil {
 				if goenvars.GetEnvBool("MONGODB_DEBUG", false) {
 					golog.Error(ctx, "error al hacer upsert add_to_set: %v", err)
 				}
 				return *new(T), fmt.Errorf("failed to perform upsert add_to_set: %w", err)
 			}
-
-			found, err := c.GetOne(ctx, upsertData.Fitlers, nil)
-			if err != nil {
-				return *new(T), err
-			}
-
-			return found, nil
 		case UpsertTypePush:
 			optsUp := options.UpdateOne().SetUpsert(true)
 
-			upPayload := bson.M{
-				"$setOnInsert": upsertData.New,
-				"$push":        upsertData.Update,
-			}
-
-			_, err := c.Connection.UpdateOne(ctx, upsertFilters, upPayload, optsUp)
+			_, err := c.Connection.UpdateOne(ctx, upsertFilters, data, optsUp)
 			if err != nil {
 				if goenvars.GetEnvBool("MONGODB_DEBUG", false) {
 					golog.Error(ctx, "error al hacer upsert push: %v", err)
 				}
 				return *new(T), fmt.Errorf("failed to perform upsert push: %w", err)
 			}
-
-			found, err := c.GetOne(ctx, upsertData.Fitlers, nil)
-			if err != nil {
-				return *new(T), err
-			}
-
-			return found, nil
 		default:
 			return *new(T), fmt.Errorf("invalid upsert type: %s", upsertData.Type)
 		}
+
+		found, err := c.GetOne(ctx, *upsertData.Filters, nil)
+		if err != nil {
+			return *new(T), err
+		}
+
+		return found, nil
 	}
 
 	payload, err := prepareNewDoc(c, data, opts)
@@ -897,6 +848,10 @@ func (c *Connection[T]) Create(ctx context.Context, data map[string]any, opts *m
 
 func (c *Connection[T]) CreateMany(ctx context.Context, data []map[string]any, opts *models.Options) ([]T, error) {
 	var payloads []any
+
+	if opts != nil && opts.Custom != nil && opts.Custom["upsert"] != nil {
+		return nil, fmt.Errorf("upsert not supported in CreateMany")
+	}
 
 	for _, item := range data {
 		payload := bson.M{}
@@ -953,6 +908,80 @@ func (c *Connection[T]) Update(ctx context.Context, filters models.GroupFilter, 
 	}
 
 	bsonFilters := prepareFilters(filters)
+
+	if opts != nil && opts.Custom != nil && opts.Custom["upsert"] != nil {
+		upsertData, ok := opts.Custom["upsert"].(Upsert)
+		if !ok {
+			return *new(T), fmt.Errorf("invalid upsert data")
+		}
+
+		if upsertData.Filters != nil && len(upsertData.Filters.Filters) == 0 {
+			bsonFilters = prepareFilters(*upsertData.Filters)
+		}
+
+		if _, ok := data["$set"]; !ok && c.InsertTimestamps {
+			data["$set"] = bson.M{
+				"updated_at": time.Now().UTC(),
+			}
+		} else if _, ok := data["$set"].(bson.M)["updated_at"]; !ok && c.InsertTimestamps {
+			data["$set"].(bson.M)["updated_at"] = time.Now().UTC()
+		}
+
+		switch upsertData.Type {
+		case UpsertTypeInsertUpdate:
+			optsUp := options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(options.After)
+
+			var result T
+			err := c.Connection.FindOneAndUpdate(ctx, bsonFilters, data, optsUp).Decode(&result)
+			if err != nil {
+				if goenvars.GetEnvBool("MONGODB_DEBUG", false) {
+					golog.Error(ctx, "error al hacer upsert insert_update: %v", err)
+				}
+
+				return *new(T), fmt.Errorf("failed to perform upsert insert_update: %w", err)
+			}
+
+			return result, nil
+		case UpsertTypeInsertReplace:
+			optsUp := options.Replace().SetUpsert(true)
+
+			_, err := c.Connection.ReplaceOne(ctx, bsonFilters, data, optsUp)
+			if err != nil {
+				if goenvars.GetEnvBool("MONGODB_DEBUG", false) {
+					golog.Error(ctx, "error al hacer upsert insert_replace: %v", err)
+				}
+				return *new(T), fmt.Errorf("failed to perform upsert insert_replace: %w", err)
+			}
+		case UpsertTypeAddToSet:
+			optsUp := options.UpdateOne().SetUpsert(true)
+			_, err := c.Connection.UpdateOne(ctx, bsonFilters, data, optsUp)
+			if err != nil {
+				if goenvars.GetEnvBool("MONGODB_DEBUG", false) {
+					golog.Error(ctx, "error al hacer upsert add_to_set: %v", err)
+				}
+				return *new(T), fmt.Errorf("failed to perform upsert add_to_set: %w", err)
+			}
+		case UpsertTypePush:
+			optsUp := options.UpdateOne().SetUpsert(true)
+
+			_, err := c.Connection.UpdateOne(ctx, bsonFilters, data, optsUp)
+			if err != nil {
+				if goenvars.GetEnvBool("MONGODB_DEBUG", false) {
+					golog.Error(ctx, "error al hacer upsert push: %v", err)
+				}
+				return *new(T), fmt.Errorf("failed to perform upsert push: %w", err)
+			}
+		default:
+			return *new(T), fmt.Errorf("invalid upsert type: %s", upsertData.Type)
+		}
+
+		found, err := c.GetOne(ctx, filters, nil)
+		if err != nil {
+			return *new(T), err
+		}
+
+		return found, nil
+	}
 
 	payload, err := prepareUpdateDoc(c, data)
 	if err != nil {
@@ -1197,6 +1226,41 @@ func prepareForeignKey(str string) string {
 }
 
 func prepareNewDoc[T Model](c *Connection[T], data map[string]any, opts *models.Options) (bson.M, error) {
+	mongoOperators := map[string]bool{
+		"$set":         true,
+		"$setOnInsert": true,
+		"$push":        true,
+		"$addToSet":    true,
+		"$pull":        true,
+		"$pullAll":     true,
+		"$inc":         true,
+		"$mul":         true,
+		"$rename":      true,
+		"$unset":       true,
+		"$currentDate": true,
+	}
+
+	findOperator := false
+	for key, value := range data {
+		if mongoOperators[key] {
+			findOperator = true
+			tmp, err := prepareNewDocData(c, value.(map[string]any), opts)
+			if err != nil {
+				return nil, err
+			}
+			data[key] = tmp
+		}
+	}
+
+	if !findOperator {
+		return prepareNewDocData(c, data, opts)
+	}
+
+	return data, nil
+}
+
+func prepareNewDocData[T Model](c *Connection[T], data map[string]any, opts *models.Options) (map[string]any, error) {
+
 	payload := bson.M{}
 
 	pkKey := "_id"
@@ -1254,6 +1318,11 @@ func prepareUpdateDoc[T Model](c *Connection[T], data map[string]any) (bson.M, e
 
 	for key, value := range data {
 		if strings.Contains(key, "_at") {
+			t, isTime := value.(time.Time)
+			if isTime {
+				update[key] = t
+				continue
+			}
 			t, err := time.Parse("2006-01-02", value.(string))
 			if err == nil {
 				update[key] = t
