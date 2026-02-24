@@ -14,6 +14,7 @@ import (
 	"github.com/Nemutagk/goenvars"
 	"github.com/Nemutagk/golog"
 	"github.com/google/uuid"
+	gErrors "github.com/pkg/errors"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
@@ -59,7 +60,7 @@ func (o *OnetoManyLoader[P, C]) Load(ctx context.Context, parentModels []any, ch
 
 		parentFieldVal := val.FieldByName(o.ParentField)
 		if !parentFieldVal.IsValid() {
-			return fmt.Errorf("parent field '%s' not found in model", o.ParentField)
+			return gErrors.Errorf("parent field '%s' not found in model", o.ParentField)
 		}
 
 		parentId := parentFieldVal.Interface()
@@ -97,7 +98,7 @@ func (o *OnetoManyLoader[P, C]) Load(ctx context.Context, parentModels []any, ch
 		foreignKeyTmp := prepareForeignKey(o.ChildFkField)
 		childFkValue := valForFieldAccess.FieldByName(foreignKeyTmp)
 		if !childFkValue.IsValid() {
-			return fmt.Errorf("child foreign key field '%s' not found in model", foreignKeyTmp)
+			return gErrors.Errorf("child foreign key field '%s' not found in model", foreignKeyTmp)
 		}
 
 		foreignKey := childFkValue.Interface()
@@ -110,7 +111,7 @@ func (o *OnetoManyLoader[P, C]) Load(ctx context.Context, parentModels []any, ch
 
 			parentIdField := parentVal.FieldByName(o.ParentField)
 			if !parentIdField.IsValid() {
-				return fmt.Errorf("invalid parent field: %s", o.ParentField)
+				return gErrors.Errorf("invalid parent field: %s", o.ParentField)
 			}
 			parentId := parentIdField.Interface()
 
@@ -120,7 +121,7 @@ func (o *OnetoManyLoader[P, C]) Load(ctx context.Context, parentModels []any, ch
 
 			containerField := parentVal.FieldByName(o.ContainerField)
 			if !containerField.IsValid() {
-				return fmt.Errorf("invalid container field: %s", o.ContainerField)
+				return gErrors.Errorf("invalid container field: %s", o.ContainerField)
 			}
 
 			elemToAppend := valForFieldAccess
@@ -137,7 +138,7 @@ func (o *OnetoManyLoader[P, C]) Load(ctx context.Context, parentModels []any, ch
 				containerField.Set(reflect.Append(containerField, elemToAppend))
 			case reflect.Ptr:
 				if containerField.Type().Elem().Kind() != reflect.Slice {
-					return fmt.Errorf("container field pointer is not pointing to a slice: %s", o.ContainerField)
+					return gErrors.Errorf("container field pointer is not pointing to a slice: %s", o.ContainerField)
 				}
 
 				if containerField.IsNil() {
@@ -152,7 +153,7 @@ func (o *OnetoManyLoader[P, C]) Load(ctx context.Context, parentModels []any, ch
 				sliceVal = reflect.Append(sliceVal, elemToAppend)
 				containerField.Elem().Set(sliceVal)
 			default:
-				return fmt.Errorf("container field is not a slice or pointer to slice: %s", o.ContainerField)
+				return gErrors.Errorf("container field is not a slice or pointer to slice: %s", o.ContainerField)
 			}
 		}
 	}
@@ -185,7 +186,7 @@ func (m *ManyToManyLoader[P, C]) Load(ctx context.Context, parentModels []any, c
 
 		parentIdField := val.FieldByName(m.ParentKey)
 		if !parentIdField.IsValid() {
-			return fmt.Errorf("invalid parent key field: %s", m.ParentKey)
+			return gErrors.Errorf("invalid parent key field: %s", m.ParentKey)
 		}
 
 		parentModelsIds = append(parentModelsIds, parentIdField.Interface())
@@ -193,7 +194,7 @@ func (m *ManyToManyLoader[P, C]) Load(ctx context.Context, parentModels []any, c
 
 	dbConn, ok := m.Connection.(*mongo.Database)
 	if !ok {
-		return fmt.Errorf("failed to assert type to *mongo.Database")
+		return gErrors.Errorf("failed to assert type to *mongo.Database")
 	}
 
 	coll := dbConn.Collection(m.PivoteTable)
@@ -209,14 +210,14 @@ func (m *ManyToManyLoader[P, C]) Load(ctx context.Context, parentModels []any, c
 
 	cursor, err := coll.Find(ctx, filters, opts)
 	if err != nil {
-		return err
+		return gErrors.WithStack(err)
 	}
 	defer cursor.Close(ctx)
 
 	var result []map[string]any
 
 	if err := cursor.All(ctx, &result); err != nil {
-		return err
+		return gErrors.WithStack(err)
 	}
 
 	listChildForParent := map[any][]any{}
@@ -254,7 +255,7 @@ func (m *ManyToManyLoader[P, C]) Load(ctx context.Context, parentModels []any, c
 
 		allChildren, err := m.Repository.Get(ctx, filters, &otps)
 		if err != nil {
-			return err
+			return gErrors.WithStack(err)
 		}
 
 		for _, child := range allChildren {
@@ -265,7 +266,7 @@ func (m *ManyToManyLoader[P, C]) Load(ctx context.Context, parentModels []any, c
 
 			childKeyField := valForFieldAcces.FieldByName(m.ChildKey)
 			if !childKeyField.IsValid() {
-				return fmt.Errorf("invalid child key field: %s", m.ChildKey)
+				return gErrors.Errorf("invalid child key field: %s", m.ChildKey)
 			}
 
 			childKeyValue := childKeyField.Interface()
@@ -309,11 +310,11 @@ func (m *ManyToManyLoader[P, C]) Load(ctx context.Context, parentModels []any, c
 			parentPtr = val
 		} else if val.Kind() == reflect.Struct {
 			if !val.CanAddr() {
-				return fmt.Errorf("cannot get address of parent model")
+				return gErrors.Errorf("cannot get address of parent model")
 			}
 			parentPtr = val.Addr()
 		} else {
-			return fmt.Errorf("invalid parent model type")
+			return gErrors.Errorf("invalid parent model type")
 		}
 
 		parentVal := parentPtr
@@ -322,12 +323,12 @@ func (m *ManyToManyLoader[P, C]) Load(ctx context.Context, parentModels []any, c
 		}
 
 		if parentVal.Kind() != reflect.Struct {
-			return fmt.Errorf("invalid parent model kind, expected struct but got %s", parentVal.Kind().String())
+			return gErrors.Errorf("invalid parent model kind, expected struct but got %s", parentVal.Kind().String())
 		}
 
 		parentIdField := parentVal.FieldByName(m.ParentKey)
 		if !parentIdField.IsValid() {
-			return fmt.Errorf("invalid parent key field: %s", m.ParentKey)
+			return gErrors.Errorf("invalid parent key field: %s", m.ParentKey)
 		}
 		parentKeyValue := fmt.Sprintf("%v", parentIdField.Interface())
 
@@ -338,7 +339,7 @@ func (m *ManyToManyLoader[P, C]) Load(ctx context.Context, parentModels []any, c
 
 		containerField := parentVal.FieldByName(m.ContainerField)
 		if !containerField.IsValid() {
-			return fmt.Errorf("invalid container field: %s", m.ContainerField)
+			return gErrors.Errorf("invalid container field: %s", m.ContainerField)
 		}
 
 		var sliceType reflect.Type
@@ -348,7 +349,7 @@ func (m *ManyToManyLoader[P, C]) Load(ctx context.Context, parentModels []any, c
 			sliceType = containerField.Type()
 		case reflect.Ptr:
 			if containerField.Type().Elem().Kind() != reflect.Slice {
-				return fmt.Errorf("container field pointer is not pointing to a slice: %s", m.ContainerField)
+				return gErrors.Errorf("container field pointer is not pointing to a slice: %s", m.ContainerField)
 			}
 
 			if containerField.IsNil() {
@@ -362,7 +363,7 @@ func (m *ManyToManyLoader[P, C]) Load(ctx context.Context, parentModels []any, c
 			sliceType = containerField.Elem().Type()
 
 		default:
-			return fmt.Errorf("container field is not a slice or pointer to slice: %s", m.ContainerField)
+			return gErrors.Errorf("container field is not a slice or pointer to slice: %s", m.ContainerField)
 		}
 
 		elemType := sliceType.Elem()
@@ -375,7 +376,7 @@ func (m *ManyToManyLoader[P, C]) Load(ctx context.Context, parentModels []any, c
 			if elemType.Kind() == reflect.Ptr {
 				if cv.Kind() != reflect.Ptr {
 					if cv.Type() != elemType.Elem() {
-						return fmt.Errorf("child type %s does not match container element type %s",
+						return gErrors.Errorf("child type %s does not match container element type %s",
 							cv.Type(), elemType)
 					}
 					ptr := reflect.New(cv.Type())
@@ -383,7 +384,7 @@ func (m *ManyToManyLoader[P, C]) Load(ctx context.Context, parentModels []any, c
 					cv = ptr
 				} else {
 					if cv.Type() != elemType {
-						return fmt.Errorf("child pointer type %s does not match container element type %s",
+						return gErrors.Errorf("child pointer type %s does not match container element type %s",
 							cv.Type(), elemType)
 					}
 				}
@@ -392,7 +393,7 @@ func (m *ManyToManyLoader[P, C]) Load(ctx context.Context, parentModels []any, c
 					cv = cv.Elem()
 				}
 				if cv.Type() != elemType {
-					return fmt.Errorf("child value type %s does not match container element type %s",
+					return gErrors.Errorf("child value type %s does not match container element type %s",
 						cv.Type(), elemType)
 				}
 			}
@@ -431,7 +432,7 @@ func (c *OnetoOneLoader[P, C]) Load(ctx context.Context, parentModel []any, chil
 
 	parentIdField := val.FieldByName(c.ParentField)
 	if !parentIdField.IsValid() {
-		return fmt.Errorf("invalid parent field: %s", c.ParentField)
+		return gErrors.Errorf("invalid parent field: %s", c.ParentField)
 	}
 	parentId := parentIdField.Interface()
 
@@ -449,16 +450,16 @@ func (c *OnetoOneLoader[P, C]) Load(ctx context.Context, parentModel []any, chil
 
 	childModel, err := c.Repository.GetOne(ctx, filterChild, &opts)
 	if err != nil {
-		return fmt.Errorf("failed to load child model: %w", err)
+		return gErrors.Wrap(err, "failed to load child model")
 	}
 
 	containerFlied := val.FieldByName(c.ContainerField)
 	if !containerFlied.IsValid() {
-		return fmt.Errorf("invalid container field: %s", c.ContainerField)
+		return gErrors.Errorf("invalid container field: %s", c.ContainerField)
 	}
 
 	if !containerFlied.CanSet() {
-		return fmt.Errorf("cannot set container field: %s", c.ContainerField)
+		return gErrors.Errorf("cannot set container field: %s", c.ContainerField)
 	}
 
 	childVal := reflect.ValueOf(childModel)
@@ -467,7 +468,7 @@ func (c *OnetoOneLoader[P, C]) Load(ctx context.Context, parentModel []any, chil
 	case reflect.Ptr:
 		if childVal.Kind() != reflect.Ptr {
 			if childVal.Type() != containerFlied.Type().Elem() {
-				return fmt.Errorf("child type %s does not match container field type %s",
+				return gErrors.Errorf("child type %s does not match container field type %s",
 					childVal.Type(), containerFlied.Type().Elem())
 			}
 			ptr := reflect.New(childVal.Type())
@@ -475,7 +476,7 @@ func (c *OnetoOneLoader[P, C]) Load(ctx context.Context, parentModel []any, chil
 			childVal = ptr
 		} else {
 			if childVal.Type() != containerFlied.Type() {
-				return fmt.Errorf("child pointer type %s does not match container field type %s",
+				return gErrors.Errorf("child pointer type %s does not match container field type %s",
 					childVal.Type(), containerFlied.Type())
 			}
 		}
@@ -484,7 +485,7 @@ func (c *OnetoOneLoader[P, C]) Load(ctx context.Context, parentModel []any, chil
 		if childVal.Type().Implements(containerFlied.Type()) {
 			containerFlied.Set(childVal)
 		} else {
-			return fmt.Errorf("child type %s does not implement container interface type %s",
+			return gErrors.Errorf("child type %s does not implement container interface type %s",
 				childVal.Type(), containerFlied.Type())
 		}
 	default:
@@ -492,7 +493,7 @@ func (c *OnetoOneLoader[P, C]) Load(ctx context.Context, parentModel []any, chil
 			childVal = childVal.Elem()
 		}
 		if childVal.Type() != containerFlied.Type() {
-			return fmt.Errorf("child value type %s does not match container field type %s",
+			return gErrors.Errorf("child value type %s does not match container field type %s",
 				childVal.Type(), containerFlied.Type())
 		}
 		containerFlied.Set(childVal)
@@ -619,13 +620,13 @@ func (c *Connection[T]) Get(ctx context.Context, filters models.GroupFilter, opt
 			return nil, godb.ErrNoDocumentsFound
 		}
 
-		return nil, err
+		return nil, gErrors.WithStack(err)
 	}
 
 	defer cursor.Close(ctx)
 
 	if err := cursor.All(ctx, &results); err != nil {
-		return nil, err
+		return nil, gErrors.WithStack(err)
 	}
 
 	if opts != nil && len(opts.Relations) > 0 && c.RelationLoaders != nil {
@@ -654,7 +655,7 @@ func (c *Connection[T]) Get(ctx context.Context, filters models.GroupFilter, opt
 			}
 
 			if err := loader.Load(ctx, anyModels, childs); err != nil {
-				return nil, fmt.Errorf("falied to load relation %s: %s", relation, err)
+				return nil, gErrors.Wrapf(err, "failed to load relation %s", relation)
 			}
 		}
 	}
@@ -697,7 +698,7 @@ func (c *Connection[T]) GetOne(ctx context.Context, filters models.GroupFilter, 
 			if err == mongo.ErrNoDocuments {
 				return *new(T), godb.ErrNoDocumentsFound
 			}
-			return *new(T), err
+			return *new(T), gErrors.WithStack(err)
 		}
 
 		return result, nil
@@ -709,7 +710,7 @@ func (c *Connection[T]) GetOne(ctx context.Context, filters models.GroupFilter, 
 		if err == mongo.ErrNoDocuments {
 			return *new(T), godb.ErrNoDocumentsFound
 		}
-		return *new(T), err
+		return *new(T), gErrors.WithStack(err)
 	}
 
 	if opts != nil && len(opts.Relations) > 0 && c.RelationLoaders != nil {
@@ -732,7 +733,7 @@ func (c *Connection[T]) GetOne(ctx context.Context, filters models.GroupFilter, 
 			}
 
 			if err := loader.Load(ctx, anyModels, childs); err != nil {
-				return *new(T), fmt.Errorf("falied to load relation %s: %s", relation, err)
+				return *new(T), gErrors.Wrapf(err, "falied to load relation %s", relation)
 			}
 		}
 	}
@@ -755,7 +756,7 @@ func (c *Connection[T]) Create(ctx context.Context, data map[string]any, opts *m
 
 		data, err := prepareNewDoc(c, data, opts)
 		if err != nil {
-			return *new(T), err
+			return *new(T), gErrors.WithStack(err)
 		}
 
 		upsertFilters := prepareFilters(*upsertData.Filters)
@@ -770,7 +771,7 @@ func (c *Connection[T]) Create(ctx context.Context, data map[string]any, opts *m
 					golog.Error(ctx, "error al hacer upsert insert_update: %v", err)
 				}
 
-				return *new(T), fmt.Errorf("failed to perform upsert insert_update: %w", err)
+				return *new(T), gErrors.Wrap(err, "failed to perform upsert insert_update")
 			}
 
 			return result, nil
@@ -782,7 +783,7 @@ func (c *Connection[T]) Create(ctx context.Context, data map[string]any, opts *m
 				if goenvars.GetEnvBool("MONGODB_DEBUG", false) {
 					golog.Error(ctx, "error al hacer upsert insert_replace: %v", err)
 				}
-				return *new(T), fmt.Errorf("failed to perform upsert insert_replace: %w", err)
+				return *new(T), gErrors.Wrap(err, "failed to perform upsert insert_replace")
 			}
 		case UpsertTypeAddToSet:
 			optsUp := options.UpdateOne().SetUpsert(true)
@@ -792,7 +793,7 @@ func (c *Connection[T]) Create(ctx context.Context, data map[string]any, opts *m
 				if goenvars.GetEnvBool("MONGODB_DEBUG", false) {
 					golog.Error(ctx, "error al hacer upsert add_to_set: %v", err)
 				}
-				return *new(T), fmt.Errorf("failed to perform upsert add_to_set: %w", err)
+				return *new(T), gErrors.Wrap(err, "failed to perform upsert add_to_set")
 			}
 		case UpsertTypePush:
 			optsUp := options.UpdateOne().SetUpsert(true)
@@ -802,7 +803,7 @@ func (c *Connection[T]) Create(ctx context.Context, data map[string]any, opts *m
 				if goenvars.GetEnvBool("MONGODB_DEBUG", false) {
 					golog.Error(ctx, "error al hacer upsert push: %v", err)
 				}
-				return *new(T), fmt.Errorf("failed to perform upsert push: %w", err)
+				return *new(T), gErrors.Wrap(err, "failed to perform upsert push")
 			}
 		default:
 			return *new(T), fmt.Errorf("invalid upsert type: %s", upsertData.Type)
@@ -810,7 +811,7 @@ func (c *Connection[T]) Create(ctx context.Context, data map[string]any, opts *m
 
 		found, err := c.GetOne(ctx, *upsertData.Filters, nil)
 		if err != nil {
-			return *new(T), err
+			return *new(T), gErrors.WithStack(err)
 		}
 
 		return found, nil
@@ -818,7 +819,7 @@ func (c *Connection[T]) Create(ctx context.Context, data map[string]any, opts *m
 
 	payload, err := prepareNewDoc(c, data, opts)
 	if err != nil {
-		return *new(T), err
+		return *new(T), gErrors.WithStack(err)
 	}
 
 	res, err := c.Connection.InsertOne(ctx, payload)
@@ -826,7 +827,7 @@ func (c *Connection[T]) Create(ctx context.Context, data map[string]any, opts *m
 		if goenvars.GetEnvBool("MONGODB_DEBUG", false) {
 			golog.Error(ctx, "error al insertar: %v", err)
 		}
-		return *new(T), err
+		return *new(T), gErrors.WithStack(err)
 	}
 
 	filter := models.GroupFilter{
@@ -840,7 +841,7 @@ func (c *Connection[T]) Create(ctx context.Context, data map[string]any, opts *m
 
 	found, err := c.GetOne(ctx, filter, nil)
 	if err != nil {
-		return *new(T), err
+		return *new(T), gErrors.WithStack(err)
 	}
 
 	return found, nil
@@ -858,7 +859,7 @@ func (c *Connection[T]) CreateMany(ctx context.Context, data []map[string]any, o
 
 		payload, err := prepareNewDoc(c, item, opts)
 		if err != nil {
-			return nil, err
+			return nil, gErrors.WithStack(err)
 		}
 
 		payloads = append(payloads, payload)
@@ -870,7 +871,7 @@ func (c *Connection[T]) CreateMany(ctx context.Context, data []map[string]any, o
 			golog.Error(ctx, "error al insertar muchos: %v", err)
 		}
 
-		return nil, err
+		return nil, gErrors.WithStack(err)
 	}
 
 	var insertedIds []any
@@ -891,7 +892,7 @@ func (c *Connection[T]) CreateMany(ctx context.Context, data []map[string]any, o
 
 	found, err := c.Get(ctx, filter, nil)
 	if err != nil {
-		return nil, err
+		return nil, gErrors.WithStack(err)
 	}
 
 	return found, nil
@@ -938,7 +939,7 @@ func (c *Connection[T]) Update(ctx context.Context, filters models.GroupFilter, 
 					golog.Error(ctx, "error al hacer upsert insert_update: %v", err)
 				}
 
-				return *new(T), fmt.Errorf("failed to perform upsert insert_update: %w", err)
+				return *new(T), gErrors.Wrap(err, "failed to perform upsert insert_update")
 			}
 
 			return result, nil
@@ -950,7 +951,7 @@ func (c *Connection[T]) Update(ctx context.Context, filters models.GroupFilter, 
 				if goenvars.GetEnvBool("MONGODB_DEBUG", false) {
 					golog.Error(ctx, "error al hacer upsert insert_replace: %v", err)
 				}
-				return *new(T), fmt.Errorf("failed to perform upsert insert_replace: %w", err)
+				return *new(T), gErrors.Wrap(err, "failed to perform upsert insert_replace")
 			}
 		case UpsertTypeAddToSet:
 			optsUp := options.UpdateOne().SetUpsert(true)
@@ -959,7 +960,7 @@ func (c *Connection[T]) Update(ctx context.Context, filters models.GroupFilter, 
 				if goenvars.GetEnvBool("MONGODB_DEBUG", false) {
 					golog.Error(ctx, "error al hacer upsert add_to_set: %v", err)
 				}
-				return *new(T), fmt.Errorf("failed to perform upsert add_to_set: %w", err)
+				return *new(T), gErrors.Wrap(err, "failed to perform upsert add_to_set")
 			}
 		case UpsertTypePush:
 			optsUp := options.UpdateOne().SetUpsert(true)
@@ -969,7 +970,7 @@ func (c *Connection[T]) Update(ctx context.Context, filters models.GroupFilter, 
 				if goenvars.GetEnvBool("MONGODB_DEBUG", false) {
 					golog.Error(ctx, "error al hacer upsert push: %v", err)
 				}
-				return *new(T), fmt.Errorf("failed to perform upsert push: %w", err)
+				return *new(T), gErrors.Wrap(err, "failed to perform upsert push")
 			}
 		default:
 			return *new(T), fmt.Errorf("invalid upsert type: %s", upsertData.Type)
@@ -977,7 +978,7 @@ func (c *Connection[T]) Update(ctx context.Context, filters models.GroupFilter, 
 
 		found, err := c.GetOne(ctx, filters, nil)
 		if err != nil {
-			return *new(T), err
+			return *new(T), gErrors.WithStack(err)
 		}
 
 		return found, nil
@@ -985,7 +986,7 @@ func (c *Connection[T]) Update(ctx context.Context, filters models.GroupFilter, 
 
 	payload, err := prepareUpdateDoc(c, data)
 	if err != nil {
-		return *new(T), err
+		return *new(T), gErrors.WithStack(err)
 	}
 
 	update := bson.M{
@@ -1002,12 +1003,12 @@ func (c *Connection[T]) Update(ctx context.Context, filters models.GroupFilter, 
 			return *new(T), godb.ErrNoDocumentsFound
 		}
 
-		return *new(T), err
+		return *new(T), gErrors.WithStack(err)
 	}
 
 	updated, err := c.GetOne(ctx, filters, nil)
 	if err != nil {
-		return *new(T), err
+		return *new(T), gErrors.WithStack(err)
 	}
 
 	return updated, nil
@@ -1034,7 +1035,7 @@ func (c *Connection[T]) Delete(ctx context.Context, filters models.GroupFilter) 
 
 		_, err := c.Connection.UpdateMany(ctx, bsonFilters, update)
 		if err != nil {
-			return err
+			return gErrors.WithStack(err)
 		}
 
 		return nil
@@ -1049,7 +1050,7 @@ func (c *Connection[T]) Delete(ctx context.Context, filters models.GroupFilter) 
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return godb.ErrNoDocumentsFound
 		}
-		return err
+		return gErrors.WithStack(err)
 	}
 
 	return nil
@@ -1058,11 +1059,11 @@ func (c *Connection[T]) Delete(ctx context.Context, filters models.GroupFilter) 
 func (c *Connection[T]) TransactionStart(ctx context.Context) (*models.Transaction, error) {
 	session, err := c.RawConnection.Client().StartSession()
 	if err != nil {
-		return nil, err
+		return nil, gErrors.WithStack(err)
 	}
 
 	if err := session.StartTransaction(); err != nil {
-		return nil, err
+		return nil, gErrors.WithStack(err)
 	}
 
 	return &models.Transaction{
@@ -1078,7 +1079,7 @@ func (c *Connection[T]) TransactionCommit(ctx context.Context, tx *models.Transa
 	}
 
 	if err := mSession.CommitTransaction(ctx); err != nil {
-		return err
+		return gErrors.WithStack(err)
 	}
 
 	return nil
@@ -1091,7 +1092,7 @@ func (c *Connection[T]) TransactionRollback(ctx context.Context, tx *models.Tran
 	}
 
 	if err := mSession.AbortTransaction(ctx); err != nil {
-		return err
+		return gErrors.WithStack(err)
 	}
 
 	return nil
@@ -1115,7 +1116,7 @@ func (c *Connection[T]) Count(ctx context.Context, filters models.GroupFilter) (
 			golog.Error(ctx, "error al contar documentos: %v", err)
 		}
 
-		return 0, err
+		return 0, gErrors.WithStack(err)
 	}
 
 	return count, nil
