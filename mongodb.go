@@ -2,6 +2,7 @@ package godbmongodb
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -572,6 +573,10 @@ func (c *Connection[T]) GetOrderColumns() map[string]string {
 }
 
 func (c *Connection[T]) GetConnection() any {
+	return c.RawConnection.Collection(c.Collection)
+}
+
+func (c *Connection[T]) GetMongoConnection() *mongo.Database {
 	return c.RawConnection
 }
 
@@ -910,6 +915,12 @@ func (c *Connection[T]) Update(ctx context.Context, filters models.GroupFilter, 
 
 	bsonFilters := prepareFilters(filters)
 
+	insert_update_timestamps := c.InsertTimestamps
+
+	if opts.TimestampsFields != nil {
+		insert_update_timestamps = *opts.TimestampsFields
+	}
+
 	if opts != nil && opts.Custom != nil && opts.Custom["upsert"] != nil {
 		upsertData, ok := opts.Custom["upsert"].(Upsert)
 		if !ok {
@@ -920,13 +931,21 @@ func (c *Connection[T]) Update(ctx context.Context, filters models.GroupFilter, 
 			bsonFilters = prepareFilters(*upsertData.Filters)
 		}
 
-		if _, ok := data["$set"]; !ok && c.InsertTimestamps {
-			data["$set"] = bson.M{
-				"updated_at": time.Now().UTC(),
+		if insert_update_timestamps {
+			if _, ok := data["$set"]; !ok {
+				data["$set"] = bson.M{
+					"updated_at": time.Now().UTC(),
+				}
+			} else if _, ok := data["$set"].(bson.M)["updated_at"]; !ok {
+				data["$set"].(bson.M)["updated_at"] = time.Now().UTC()
 			}
-		} else if _, ok := data["$set"].(bson.M)["updated_at"]; !ok && c.InsertTimestamps {
-			data["$set"].(bson.M)["updated_at"] = time.Now().UTC()
 		}
+
+		jsonData, err := json.Marshal(data)
+		if err != nil {
+			return *new(T), gErrors.WithStack(err)
+		}
+		golog.Log(ctx, "json data: %s", jsonData)
 
 		switch upsertData.Type {
 		case UpsertTypeInsertUpdate:
@@ -958,7 +977,7 @@ func (c *Connection[T]) Update(ctx context.Context, filters models.GroupFilter, 
 			_, err := c.Connection.UpdateOne(ctx, bsonFilters, data, optsUp)
 			if err != nil {
 				if goenvars.GetEnvBool("MONGODB_DEBUG", false) {
-					golog.Error(ctx, "error al hacer upsert add_to_set: %v", err)
+					golog.Error(ctx, "error al hacer upsert add_to_set: %+v", err)
 				}
 				return *new(T), gErrors.Wrap(err, "failed to perform upsert add_to_set")
 			}
@@ -989,8 +1008,27 @@ func (c *Connection[T]) Update(ctx context.Context, filters models.GroupFilter, 
 		return *new(T), gErrors.WithStack(err)
 	}
 
-	update := bson.M{
-		"$set": payload,
+	var update bson.M
+	if !hasOperator(data, "") {
+		if insert_update_timestamps {
+			payload["updated_at"] = time.Now().UTC()
+		}
+
+		update = bson.M{
+			"$set": payload,
+		}
+	} else {
+		update = payload
+
+		if insert_update_timestamps {
+			if hasOperator(update, "$set") {
+				update["$set"].(bson.M)["updated_at"] = time.Now().UTC()
+			} else {
+				update["$set"] = bson.M{
+					"updated_at": time.Now().UTC(),
+				}
+			}
+		}
 	}
 
 	_, err = c.Connection.UpdateMany(ctx, bsonFilters, update)
@@ -1285,6 +1323,16 @@ func prepareNewDocData[T Model](c *Connection[T], data map[string]any, opts *mod
 
 	for key, value := range data {
 		if strings.Contains(key, "_at") {
+			if _, ok := value.(time.Time); ok {
+				payload[key] = value
+				continue
+			}
+
+			if _, ok := value.(bson.DateTime); ok {
+				payload[key] = value
+				continue
+			}
+
 			t, err := time.Parse("2006-01-02", value.(string))
 			if err == nil {
 				payload[key] = t
@@ -1300,6 +1348,11 @@ func prepareNewDocData[T Model](c *Connection[T], data map[string]any, opts *mod
 				payload[key] = t
 				continue
 			}
+		}
+
+		if _, ok := value.(time.Time); ok {
+			payload[key] = value
+			continue
 		}
 
 		payload[key] = value
@@ -1344,9 +1397,52 @@ func prepareUpdateDoc[T Model](c *Connection[T], data map[string]any) (bson.M, e
 		update[key] = value
 	}
 
-	if c.InsertTimestamps {
-		update["updated_at"] = time.Now().UTC()
+	return update, nil
+}
+
+func hasOperator(data map[string]any, specific string) bool {
+	if specific != "" {
+		hasOperator := false
+		for key := range data {
+			if key == specific {
+				hasOperator = true
+				break
+			}
+		}
+
+		return hasOperator
 	}
 
-	return update, nil
+	var MongoUpdateOperators = map[string]string{
+		// Field Update Operators
+		"$set":         "$set",
+		"$unset":       "$unset",
+		"$inc":         "$inc",
+		"$mul":         "$mul",
+		"$rename":      "$rename",
+		"$min":         "$min",
+		"$max":         "$max",
+		"$currentDate": "$currentDate",
+		"$setOnInsert": "$setOnInsert",
+
+		// Array Update Operators
+		"$addToSet": "$addToSet",
+		"$pop":      "$pop",
+		"$pull":     "$pull",
+		"$push":     "$push",
+		"$pullAll":  "$pullAll",
+
+		// Bitwise
+		"$bit": "$bit",
+	}
+
+	hasOperator := false
+	for key := range data {
+		if MongoUpdateOperators[key] != "" {
+			hasOperator = true
+			break
+		}
+	}
+
+	return hasOperator
 }
