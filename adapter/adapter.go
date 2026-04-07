@@ -3,6 +3,7 @@ package adapter
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -29,10 +30,21 @@ func NewAdapter() (*MongodbAdapter, error) {
 
 func (m *MongodbAdapter) SetConf(name string, config config.Config) error {
 	useSrv := false
-	if _, ok := config.Params["srv"]; ok && useSrv {
-		useSrv = true
+	if srvStr, ok := config.Params["srv"]; ok {
+		srv, ok := srvStr.(bool)
+		if !ok {
+			srvTmp, err := strconv.ParseBool(srvStr.(string))
+			if err != nil {
+				fmt.Println("srv no es un booleano valido, se usara el valor por defecto (false)")
+			} else {
+				useSrv = srvTmp
+			}
+		} else {
+			useSrv = srv
+		}
 	}
 
+	fmt.Println("config: ", config)
 	uri := ""
 	if !useSrv {
 		dbAuth := "admin"
