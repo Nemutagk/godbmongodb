@@ -44,7 +44,6 @@ func (m *MongodbAdapter) SetConf(name string, config config.Config) error {
 		}
 	}
 
-	fmt.Println("config: ", config)
 	uri := ""
 	if !useSrv {
 		dbAuth := "admin"
